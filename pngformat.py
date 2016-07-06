@@ -16,12 +16,24 @@ PNG_IEND = 'IEND'
 
 bstr = binascii.hexlify
 
-TEST_FP = 'pngImages/layer2.png'
+TEST_FP = 'pngImages/test1.png'
 
 
 class PngFileHandle(object):
     def __init__(self, *args, **kwargs):
         self.chunks = []
+
+    @property
+    def width(self):
+        ihdr_block = None
+        for ch2 in self.chunks:
+            if ch2.chunk_type == PNG_IHDR:
+                ihdr_block = ch2
+
+        width_bytes = ihdr_block.chunk_data[:4]
+        return struct.unpack('>i', width_bytes)[0]
+
+
 
     @property
     def decompressed_data(self):
@@ -54,12 +66,17 @@ class PngFileHandle(object):
         return new_png
 
     def get_pixels(self):
+        width = self.width
         pix_data = self.decompressed_data
         data_buf = io.BytesIO(pix_data)
         pix_len = len(pix_data)
+        lines_pixls = 0
         while data_buf.tell() < pix_len:
+            if lines_pixls % width == 0:
+                line_bit = data_buf.read(1)
             pix_bin = data_buf.read(4)
-            yield bstr(pix_bin), struct.unpack('>4B', pix_bin)
+            lines_pixls += 1
+            yield data_buf.tell(), bstr(pix_bin), struct.unpack('>4B', pix_bin)
 
         data_buf.close()
 
@@ -130,6 +147,7 @@ for ch in png1.chunks:
     if ch.chunk_type == PNG_IDAT:
         print ch.data_as_hex[:30]
 
-for p1 in png1.get_pixels():
-    print p1
+with open('dump.txt', 'w') as fd2:
+    for p1 in png1.get_pixels():
+        fd2.write(repr(p1) + '\n')
 print "hi"
