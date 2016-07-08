@@ -17,7 +17,11 @@ PNG_IEND = 'IEND'
 
 bstr = binascii.hexlify
 
-TEST_FP = 'pngImages/test1.png'
+TEST_FP = 'pngImages/layer2.png'
+
+
+def sync_io(fd1, fd2):
+    fd2.seek(fd1.tell(), 0)
 
 
 class PngChunk(object):
@@ -191,19 +195,66 @@ class PngFileHandle(object):
                 pix_keys.append('a')
 
         data_buf = io.BytesIO(pix_data)
+        data_buf2 = io.BytesIO(pix_data)
+        data_buf_filtered = io.BytesIO()
         all_pix_len = len(pix_data)
-        lines_pixls = 0
+        pix_index = 0
+        scan_lines = 0
+        line_filter = CodesFilterTypes(0)  # Filter type "None"
+        struct_filter_byte = struct.Struct('>B')
         one_pix_frmt = struct.Struct(pix_frmt)
         one_pix_len = one_pix_frmt.size
 
         while data_buf.tell() < all_pix_len:
-            if lines_pixls % width == 0:
-                line_bit = data_buf.read(1)
-            pix_bin = data_buf.read(one_pix_len)
-            lines_pixls += 1
-            yield data_buf.tell(), bstr(pix_bin), dict(zip(pix_keys, one_pix_frmt.unpack(pix_bin)))
+            if pix_index % width == 0:  # This is a filter byte
+                line_filter = CodesFilterTypes(struct_filter_byte.unpack(data_buf.read(1))[0])
+                data_buf_filtered.write(struct_filter_byte.pack(line_filter))
+            else:
+                pix_byte_pos = data_buf.tell()
+                pix_bin_raw = data_buf.read(one_pix_len)
+                pix_byte_raw = one_pix_frmt.unpack(pix_bin_raw)
+
+                if line_filter.name == 'None':
+                    data_buf_filtered.write(pix_bin_raw)
+
+                elif line_filter.name == 'Sub':
+
+                    other_pix_byte_pos = pix_byte_pos - one_pix_len
+                    if pix_index % width == 1:
+                        other_pix_byte_pos -= 1
+
+                    data_buf_filtered.write(pix_bin_raw)  # Temporary allow
+                    # TODO: finish
+
+                elif line_filter.name == 'Up':
+                    data_buf_filtered.write(pix_bin_raw)  # Temporary allow
+                    # TODO: finish
+                elif line_filter.name == 'Average':
+                    data_buf_filtered.write(pix_bin_raw)  # Temporary allow
+                    # TODO: finish
+                elif line_filter.name == 'Paeth':
+                    data_buf_filtered.write(pix_bin_raw)  # Temporary allow
+                    # TODO: finish
+                else:
+                    raise NotImplementedError('Have yet to implement filter :' + line_filter.name)
+                pix_index += 1
+        pix_index = 0
+
+        data_buf_filtered.seek(0)
+
+        while data_buf_filtered.tell() < all_pix_len:
+            if pix_index % width == 0:  # This is a filter byte
+                line_filter = CodesFilterTypes(struct_filter_byte.unpack(data_buf_filtered.read(1))[0])
+                yield line_filter.name
+            pix_byte_pos = data_buf_filtered.tell()
+            pix_bin_filtered = data_buf_filtered.read(one_pix_len)
+
+            pix_index += 1
+            yield data_buf_filtered.tell(), bstr(pix_bin_filtered), dict(zip(pix_keys, one_pix_frmt.unpack(pix_bin_filtered)))
 
         data_buf.close()
+        data_buf2.close()
+        data_buf_filtered.close()
 
 
 class IHDRDict(OrderedDict, object):
@@ -292,17 +343,30 @@ class CodesColorType(int, object):
         return {'palette': self.uses_palette, 'color': self.uses_color, 'alpha': self.uses_alpha}
 
 
+class CodesFilterTypes(int, object):
+    NONE = 0
+    SUB = 1
+    UP = 2
+    AVERAGE = 3
+    PAETH = 4
+
+    @property
+    def name(self):
+        return ('None', 'Sub', 'Up', 'Average', 'Paeth')[self]
+
 png1 = PngFileHandle.read_file(TEST_FP)
 for ch in png1.chunks:
     if ch.chunk_type == PNG_IDAT:
         print ch.data_as_hex[:30]
+
+print CodesFilterTypes.NONE
 
 print bstr(png1.ihdr_dict.chunk_bytes)
 print png1.ihdr_dict
 print png1.ihdr_dict.crc
 print CodesColorType(png1.ihdr_dict.color_type).as_dict
 
-with open('dump.txt', 'w') as fd2:
+with open('dump2.txt', 'w') as fd2:
     for p1 in png1.get_pixels():
         fd2.write(repr(p1) + '\n')
 print "hi"
