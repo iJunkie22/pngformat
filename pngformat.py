@@ -123,15 +123,85 @@ class PngFileHandle(object):
     def get_pixels(self):
         width = self.width
         pix_data = self.decompressed_data
+        bit_depth = self.ihdr_dict.bit_depth
+        color_type = CodesColorType(self.ihdr_dict.color_type)
+
+        pix_keys = []
+        pix_frmt = '>'
+        if color_type.uses_palette:
+            pix_keys.append('pi')
+            if bit_depth == 1:
+                raise NotImplementedError('Have yet to implement 1-bit stuff')
+            elif bit_depth == 2:
+                pix_frmt += 'B'
+            elif bit_depth == 4:
+                pix_frmt += 'H'
+            elif bit_depth == 8:
+                pix_frmt += 'I'
+            else:
+                raise ValueError('Illegal bit-depth for this color type')
+        else:
+            if color_type.uses_color:
+                pix_keys.extend(('r', 'g', 'b'))
+
+                if bit_depth == 8:
+                    pix_frmt += '3B'
+
+                    if color_type.uses_alpha:
+                        pix_frmt += 'B'
+                    else:
+                        pix_frmt += 'x'
+
+                elif bit_depth == 16:
+                    pix_frmt += '3H'
+                    if color_type.uses_alpha:
+                        pix_frmt += 'H'
+                    else:
+                        pix_frmt += 'xx'
+                else:
+                    raise ValueError('Illegal bit-depth for this color type')
+            else:
+                pix_keys.append('v')
+
+                if bit_depth == 1:
+                    raise NotImplementedError('Have yet to implement 1-bit stuff')
+
+                elif bit_depth == 2:
+                    pix_frmt += 'B'
+
+                elif bit_depth == 4:
+                    pix_frmt += 'H'
+
+                elif bit_depth == 8:
+                    if color_type.uses_alpha:
+                        pix_frmt += 'H'
+                    else:
+                        pix_frmt += 'I'
+
+                elif bit_depth == 16:
+                    if color_type.uses_alpha:
+                        pix_frmt += 'I'
+                    else:
+                        pix_frmt += 'Q'
+
+                else:
+                    raise ValueError('Illegal bit-depth for this color type')
+
+            if color_type.uses_alpha:
+                pix_keys.append('a')
+
         data_buf = io.BytesIO(pix_data)
-        pix_len = len(pix_data)
+        all_pix_len = len(pix_data)
         lines_pixls = 0
-        while data_buf.tell() < pix_len:
+        one_pix_frmt = struct.Struct(pix_frmt)
+        one_pix_len = one_pix_frmt.size
+
+        while data_buf.tell() < all_pix_len:
             if lines_pixls % width == 0:
                 line_bit = data_buf.read(1)
-            pix_bin = data_buf.read(4)
+            pix_bin = data_buf.read(one_pix_len)
             lines_pixls += 1
-            yield data_buf.tell(), bstr(pix_bin), struct.unpack('>4B', pix_bin)
+            yield data_buf.tell(), bstr(pix_bin), dict(zip(pix_keys, one_pix_frmt.unpack(pix_bin)))
 
         data_buf.close()
 
@@ -204,13 +274,33 @@ def read_chunk(fd_in):
     return {'Length': cl, 'ChunkType': ct, 'ChunkData': sdata, 'CRC': crc}
 
 
+class CodesColorType(int, object):
+    @property
+    def uses_palette(self):
+        return self == 3
+
+    @property
+    def uses_color(self):
+        return self == 2 or self == 6
+
+    @property
+    def uses_alpha(self):
+        return self == 4 or self == 6
+
+    @property
+    def as_dict(self):
+        return {'palette': self.uses_palette, 'color': self.uses_color, 'alpha': self.uses_alpha}
+
+
 png1 = PngFileHandle.read_file(TEST_FP)
 for ch in png1.chunks:
     if ch.chunk_type == PNG_IDAT:
         print ch.data_as_hex[:30]
 
 print bstr(png1.ihdr_dict.chunk_bytes)
+print png1.ihdr_dict
 print png1.ihdr_dict.crc
+print CodesColorType(png1.ihdr_dict.color_type).as_dict
 
 with open('dump.txt', 'w') as fd2:
     for p1 in png1.get_pixels():
