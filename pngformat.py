@@ -18,7 +18,7 @@ PNG_IEND = 'IEND'
 
 bstr = binascii.hexlify
 
-TEST_FP = 'pngImages/layer2.png'
+TEST_FP = 'pngImages/test1.png'
 
 
 def sync_io(fd1, fd2):
@@ -432,7 +432,7 @@ print png1.ihdr_dict
 print png1.ihdr_dict.crc
 print CodesColorType(png1.ihdr_dict.color_type).as_dict
 
-with open('dump2.txt', 'w') as fd2:
+with open('dump1.txt', 'w') as fd2:
     for p1 in png1.get_pixels():
         fd2.write(repr(p1) + '\n')
 print "hi"
