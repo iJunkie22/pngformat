@@ -5,7 +5,8 @@ import binascii
 import base64
 import zlib
 import io
-from collections import OrderedDict
+from collections import OrderedDict, deque
+import operator
 
 
 PNG_HEAD = b'\x89\x50\x4E\x47\x0D\x0A\x1A\x0A'
@@ -149,7 +150,7 @@ class PngFileHandle(object):
                 pix_keys.extend(('r', 'g', 'b'))
 
                 if bit_depth == 8:
-                    pix_frmt += '3B'
+                    pix_frmt += 'BBB'
 
                     if color_type.uses_alpha:
                         pix_frmt += 'B'
@@ -157,7 +158,7 @@ class PngFileHandle(object):
                         pix_frmt += 'x'
 
                 elif bit_depth == 16:
-                    pix_frmt += '3H'
+                    pix_frmt += 'HHH'
                     if color_type.uses_alpha:
                         pix_frmt += 'H'
                     else:
@@ -195,7 +196,7 @@ class PngFileHandle(object):
                 pix_keys.append('a')
 
         data_buf = io.BytesIO(pix_data)
-        data_buf2 = io.BytesIO(pix_data)
+        data_buf_zero = io.BytesIO()
         data_buf_filtered = io.BytesIO()
         all_pix_len = len(pix_data)
         pix_index = 0
@@ -205,44 +206,109 @@ class PngFileHandle(object):
         one_pix_frmt = struct.Struct(pix_frmt)
         one_pix_len = one_pix_frmt.size
 
+        pix_bytes_frmt_parts = [struct.Struct('>' + x) for x in pix_frmt[1:]]
+        pix_bytes_frmt_parts_sizes = [x.size for x in pix_bytes_frmt_parts]
+
+        prev_sl_deque = deque()
+        curr_sl_deque = deque()
+
+        for x in xrange(width * one_pix_len):
+            data_buf_zero.write('\x00')
+
+        data_buf_zero.seek(0)
+        for x in xrange(width):
+            curr_sl_deque.append(
+                [
+                    pix_bytes_frmt_parts[i].unpack(
+                        data_buf_zero.read(pix_bytes_frmt_parts_sizes[i])
+                    )[0]
+                    for i in xrange(len(pix_bytes_frmt_parts_sizes))
+                ])
+
         while data_buf.tell() < all_pix_len:
-            if pix_index % width == 0:  # This is a filter byte
+            # if pix_index % width == 0:  # This is a filter byte
+            if len(curr_sl_deque) == width:
+                if pix_index != 0:
+                    for pix in curr_sl_deque:  # Dump the previous scanline
+                        for i in xrange(len(pix_bytes_frmt_parts_sizes)):
+                            try:
+                                r2 = pix_bytes_frmt_parts[i].pack(pix[i])
+                            except struct.error:
+                                r2 = pix_bytes_frmt_parts[i].pack(0)
+                            data_buf_filtered.write(r2)
+
+                prev_sl_deque = curr_sl_deque
+                curr_sl_deque = deque()
+
                 line_filter = CodesFilterTypes(struct_filter_byte.unpack(data_buf.read(1))[0])
                 data_buf_filtered.write(struct_filter_byte.pack(line_filter))
             else:
                 pix_byte_pos = data_buf.tell()
-                pix_bin_raw = data_buf.read(one_pix_len)
-                pix_byte_raw = one_pix_frmt.unpack(pix_bin_raw)
+                next_pix = []
+                for i in xrange(len(pix_bytes_frmt_parts_sizes)):
+                    pb2 = data_buf.read(pix_bytes_frmt_parts_sizes[i])
+                    pbr = pix_bytes_frmt_parts[i].unpack(pb2)
+                    next_pix.append(pbr[0])
+                curr_sl_deque.append(next_pix)
+
+                # pix_bin_raw = data_buf.read(one_pix_len)
+                # pix_byte_raw = one_pix_frmt.unpack(pix_bin_raw)
 
                 if line_filter.name == 'None':
-                    data_buf_filtered.write(pix_bin_raw)
+                    # data_buf_filtered.write(pix_bin_raw)
+                    pass
 
                 elif line_filter.name == 'Sub':
 
-                    other_pix_byte_pos = pix_byte_pos - one_pix_len
-                    if pix_index % width == 1:
-                        other_pix_byte_pos -= 1
+                    if len(curr_sl_deque) == 1:
+                        other_pix_byte_tup = prev_sl_deque[-1]
+                    else:
+                        other_pix_byte_tup = curr_sl_deque[-2]
 
-                    data_buf_filtered.write(pix_bin_raw)  # Temporary allow
-                    # TODO: finish
+                    cur_val = curr_sl_deque.pop()
+                    result_tup = map(operator.add, cur_val, other_pix_byte_tup)
+                    #result_tup = map(operator.abs, result_tup)
+                    curr_sl_deque.append(result_tup)
 
                 elif line_filter.name == 'Up':
-                    data_buf_filtered.write(pix_bin_raw)  # Temporary allow
-                    # TODO: finish
+                    other_pix_byte_tup = prev_sl_deque[len(curr_sl_deque) - 1]
+                    cur_val = curr_sl_deque.pop()
+                    result_tup = map(operator.add, cur_val, other_pix_byte_tup)
+                    curr_sl_deque.append(result_tup)
+
                 elif line_filter.name == 'Average':
-                    data_buf_filtered.write(pix_bin_raw)  # Temporary allow
-                    # TODO: finish
+                    if len(curr_sl_deque) == 1:
+                        other_left = prev_sl_deque[-1]
+
+                    else:
+                        other_left = curr_sl_deque[-2]
+
+                    other_above = prev_sl_deque[len(curr_sl_deque) - 1]
+
+                    other_sum = map(operator.add, other_left, other_above)
+                    other_av = map(operator.floordiv, other_sum, 2)
+
+                    result_tup = map(operator.add, curr_sl_deque.pop(), other_av)
+                    curr_sl_deque.append(result_tup)
+
                 elif line_filter.name == 'Paeth':
-                    data_buf_filtered.write(pix_bin_raw)  # Temporary allow
                     # TODO: finish
+                    pass
                 else:
                     raise NotImplementedError('Have yet to implement filter :' + line_filter.name)
-                pix_index += 1
+            pix_index += 1
+
+        for pix in curr_sl_deque:  # Dump the previous scanline
+            for i in xrange(len(pix_bytes_frmt_parts_sizes)):
+                data_buf_filtered.write(pix_bytes_frmt_parts[i].pack(pix[i]))
+
         pix_index = 0
+
+        filtered_len = data_buf_filtered.tell()
 
         data_buf_filtered.seek(0)
 
-        while data_buf_filtered.tell() < all_pix_len:
+        while data_buf_filtered.tell() < (filtered_len - one_pix_len):
             if pix_index % width == 0:  # This is a filter byte
                 line_filter = CodesFilterTypes(struct_filter_byte.unpack(data_buf_filtered.read(1))[0])
                 yield line_filter.name
@@ -253,7 +319,7 @@ class PngFileHandle(object):
             yield data_buf_filtered.tell(), bstr(pix_bin_filtered), dict(zip(pix_keys, one_pix_frmt.unpack(pix_bin_filtered)))
 
         data_buf.close()
-        data_buf2.close()
+        data_buf_zero.close()
         data_buf_filtered.close()
 
 
