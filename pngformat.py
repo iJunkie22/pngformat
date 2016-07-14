@@ -128,131 +128,41 @@ class PngFileHandle(object):
     def get_pixels(self):
         width = self.width
         pix_data = self.decompressed_data
-        bit_depth = self.ihdr_dict.bit_depth
-        color_type = CodesColorType(self.ihdr_dict.color_type)
 
-        pix_keys = []
-        pix_frmt = '>'
-        if color_type.uses_palette:
-            pix_keys.append('pi')
-            if bit_depth == 1:
-                raise NotImplementedError('Have yet to implement 1-bit stuff')
-            elif bit_depth == 2:
-                pix_frmt += 'B'
-            elif bit_depth == 4:
-                pix_frmt += 'H'
-            elif bit_depth == 8:
-                pix_frmt += 'I'
-            else:
-                raise ValueError('Illegal bit-depth for this color type')
-        else:
-            if color_type.uses_color:
-                pix_keys.extend(('r', 'g', 'b'))
+        pix_info = PngPixInfo(self.ihdr_dict)
 
-                if bit_depth == 8:
-                    pix_frmt += 'BBB'
-
-                    if color_type.uses_alpha:
-                        pix_frmt += 'B'
-                    else:
-                        pix_frmt += 'x'
-
-                elif bit_depth == 16:
-                    pix_frmt += 'HHH'
-                    if color_type.uses_alpha:
-                        pix_frmt += 'H'
-                    else:
-                        pix_frmt += 'xx'
-                else:
-                    raise ValueError('Illegal bit-depth for this color type')
-            else:
-                pix_keys.append('v')
-
-                if bit_depth == 1:
-                    raise NotImplementedError('Have yet to implement 1-bit stuff')
-
-                elif bit_depth == 2:
-                    pix_frmt += 'B'
-
-                elif bit_depth == 4:
-                    pix_frmt += 'H'
-
-                elif bit_depth == 8:
-                    if color_type.uses_alpha:
-                        pix_frmt += 'H'
-                    else:
-                        pix_frmt += 'I'
-
-                elif bit_depth == 16:
-                    if color_type.uses_alpha:
-                        pix_frmt += 'I'
-                    else:
-                        pix_frmt += 'Q'
-
-                else:
-                    raise ValueError('Illegal bit-depth for this color type')
-
-            if color_type.uses_alpha:
-                pix_keys.append('a')
+        pix_frmt = pix_info.pix_frmt
+        pix_keys = pix_info.pix_keys
 
         data_buf = io.BytesIO(pix_data)
-        data_buf_zero = io.BytesIO()
         data_buf_filtered = io.BytesIO()
         all_pix_len = len(pix_data)
         pix_index = 0
         scan_lines = 0
         line_filter = CodesFilterTypes(0)  # Filter type "None"
         struct_filter_byte = struct.Struct('>B')
-        one_pix_frmt = struct.Struct(pix_frmt)
-        one_pix_len = one_pix_frmt.size
-
-        pix_bytes_frmt_parts = [struct.Struct('>' + x) for x in pix_frmt[1:]]
-        pix_bytes_frmt_parts_sizes = [x.size for x in pix_bytes_frmt_parts]
+        one_pix_frmt = pix_info.one_pix_frmt
+        one_pix_len = pix_info.one_pix_len
 
         prev_sl_deque = deque()
-        curr_sl_deque = deque()
+        curr_sl_deque = PngScanLine(pix_info)
 
-        for x in xrange(width * one_pix_len):
-            data_buf_zero.write('\x00')
-
-        data_buf_zero.seek(0)
-        for x in xrange(width):
-            curr_sl_deque.append(
-                [
-                    pix_bytes_frmt_parts[i].unpack(
-                        data_buf_zero.read(pix_bytes_frmt_parts_sizes[i])
-                    )[0]
-                    for i in xrange(len(pix_bytes_frmt_parts_sizes))
-                ])
+        curr_sl_deque.init_as_zeros()
 
         while data_buf.tell() < all_pix_len:
             # if pix_index % width == 0:  # This is a filter byte
             if len(curr_sl_deque) == width:
                 if pix_index != 0:
-                    for pix in curr_sl_deque:  # Dump the previous scanline
-                        for i in xrange(len(pix_bytes_frmt_parts_sizes)):
-                            try:
-                                r2 = pix_bytes_frmt_parts[i].pack(pix[i])
-                            except struct.error:
-                                r2 = pix_bytes_frmt_parts[i].pack(0)
-                            data_buf_filtered.write(r2)
+                    curr_sl_deque.dump_to_fd2(data_buf_filtered)
 
                 prev_sl_deque = curr_sl_deque
-                curr_sl_deque = deque()
+                curr_sl_deque = PngScanLine(pix_info)
 
-                line_filter = CodesFilterTypes(struct_filter_byte.unpack(data_buf.read(1))[0])
-                data_buf_filtered.write(struct_filter_byte.pack(line_filter))
+                line_filter = CodesFilterTypes.from_fd(data_buf)
+                data_buf_filtered.write(line_filter.as_packed)
             else:
                 pix_byte_pos = data_buf.tell()
-                next_pix = []
-                for i in xrange(len(pix_bytes_frmt_parts_sizes)):
-                    pb2 = data_buf.read(pix_bytes_frmt_parts_sizes[i])
-                    pbr = pix_bytes_frmt_parts[i].unpack(pb2)
-                    next_pix.append(pbr[0])
-                curr_sl_deque.append(next_pix)
-
-                # pix_bin_raw = data_buf.read(one_pix_len)
-                # pix_byte_raw = one_pix_frmt.unpack(pix_bin_raw)
+                curr_sl_deque.read_raw_pixel(data_buf)
 
                 if line_filter.name == 'None':
                     # data_buf_filtered.write(pix_bin_raw)
@@ -267,7 +177,6 @@ class PngFileHandle(object):
 
                     cur_val = curr_sl_deque.pop()
                     result_tup = map(operator.add, cur_val, other_pix_byte_tup)
-                    #result_tup = map(operator.abs, result_tup)
                     curr_sl_deque.append(result_tup)
 
                 elif line_filter.name == 'Up':
@@ -298,9 +207,7 @@ class PngFileHandle(object):
                     raise NotImplementedError('Have yet to implement filter :' + line_filter.name)
             pix_index += 1
 
-        for pix in curr_sl_deque:  # Dump the previous scanline
-            for i in xrange(len(pix_bytes_frmt_parts_sizes)):
-                data_buf_filtered.write(pix_bytes_frmt_parts[i].pack(pix[i]))
+        curr_sl_deque.dump_to_fd2(data_buf_filtered)
 
         pix_index = 0
 
@@ -319,7 +226,6 @@ class PngFileHandle(object):
             yield data_buf_filtered.tell(), bstr(pix_bin_filtered), dict(zip(pix_keys, one_pix_frmt.unpack(pix_bin_filtered)))
 
         data_buf.close()
-        data_buf_zero.close()
         data_buf_filtered.close()
 
 
@@ -409,16 +315,167 @@ class CodesColorType(int, object):
         return {'palette': self.uses_palette, 'color': self.uses_color, 'alpha': self.uses_alpha}
 
 
+class PngPixInfo(object):
+    def __init__(self, ihdr_d):
+        self.ihdr_d = ihdr_d
+        assert isinstance(self.ihdr_d, IHDRDict)
+        self.color_type = CodesColorType(self.ihdr_d.color_type)
+        self.bit_depth = self.ihdr_d.bit_depth
+        self.pix_keys = []
+        self.pix_frmt = '>'
+        self.width = self.ihdr_d.width
+
+        if self.color_type.uses_palette:
+            self.pix_keys.append('pi')
+            if self.bit_depth == 1:
+                raise NotImplementedError('Have yet to implement 1-bit stuff')
+            elif self.bit_depth == 2:
+                self.pix_frmt += 'B'
+            elif self.bit_depth == 4:
+                self.pix_frmt += 'H'
+            elif self.bit_depth == 8:
+                self.pix_frmt += 'I'
+            else:
+                raise ValueError('Illegal bit-depth for this color type')
+        else:
+            if self.color_type.uses_color:
+                self.pix_keys.extend(('r', 'g', 'b'))
+
+                if self.bit_depth == 8:
+                    self.pix_frmt += 'BBB'
+
+                    if self.color_type.uses_alpha:
+                        self.pix_frmt += 'B'
+                    else:
+                        self.pix_frmt += 'x'
+
+                elif self.bit_depth == 16:
+                    self.pix_frmt += 'HHH'
+                    if self.color_type.uses_alpha:
+                        self.pix_frmt += 'H'
+                    else:
+                        self.pix_frmt += 'xx'
+                else:
+                    raise ValueError('Illegal bit-depth for this color type')
+            else:
+                self.pix_keys.append('v')
+
+                if self.bit_depth == 1:
+                    raise NotImplementedError('Have yet to implement 1-bit stuff')
+
+                elif self.bit_depth == 2:
+                    self.pix_frmt += 'B'
+
+                elif self.bit_depth == 4:
+                    self.pix_frmt += 'H'
+
+                elif self.bit_depth == 8:
+                    if self.color_type.uses_alpha:
+                        self.pix_frmt += 'H'
+                    else:
+                        self.pix_frmt += 'I'
+
+                elif self.bit_depth == 16:
+                    if self.color_type.uses_alpha:
+                        self.pix_frmt += 'I'
+                    else:
+                        self.pix_frmt += 'Q'
+
+                else:
+                    raise ValueError('Illegal bit-depth for this color type')
+
+            if self.color_type.uses_alpha:
+                self.pix_keys.append('a')
+
+        self.one_pix_frmt = struct.Struct(self.pix_frmt)
+        self.one_pix_len = self.one_pix_frmt.size
+
+        self.pix_bytes_frmt_parts = [struct.Struct('>' + x) for x in self.pix_frmt[1:]]
+        self.pix_bytes_frmt_parts_sizes = [x.size for x in self.pix_bytes_frmt_parts]
+
+    def zero_pad(self):
+        data_buf_zero = io.BytesIO()
+        for x in xrange(self.width * self.one_pix_len):
+            data_buf_zero.write('\x00')
+
+        data_buf_zero.seek(0)
+        for x in xrange(self.width):
+            zero_pix = []
+            for i_frmt, i_size in zip(self.pix_bytes_frmt_parts, self.pix_bytes_frmt_parts_sizes):
+                zero_pix.append(i_frmt.unpack(data_buf_zero.read(i_size))[0])
+            yield zero_pix
+
+        data_buf_zero.close()
+
+
+class PngScanLine(deque):
+    def __init__(self, pix_info):
+        super(deque, self).__init__()
+        self.pix_info = pix_info
+        assert isinstance(self.pix_info, PngPixInfo)
+
+    def init_as_zeros(self):
+        for z_pix in self.pix_info.zero_pad():
+            self.append(z_pix)
+
+    def dump(self):
+        for pix in self:
+            for i in xrange(len(self.pix_info.pix_bytes_frmt_parts_sizes)):
+                try:
+                    r2 = self.pix_info.pix_bytes_frmt_parts[i].pack(pix[i])
+                    yield r2
+                except struct.error:
+                    r2 = self.pix_info.pix_bytes_frmt_parts[i].pack(0)
+                    yield r2
+
+    def dump2(self):
+        for pix in self:  # Dump the previous scanline
+            for i in xrange(len(self.pix_info.pix_bytes_frmt_parts_sizes)):
+                try:
+                    r2 = self.pix_info.pix_bytes_frmt_parts[i].pack(pix[i])
+                except struct.error:
+                    r2 = self.pix_info.pix_bytes_frmt_parts[i].pack(0)
+                yield r2
+
+    def read_raw_pixel(self, fd_in_4):
+        next_pix = []
+        for i in xrange(len(self.pix_info.pix_bytes_frmt_parts_sizes)):
+            pb2 = fd_in_4.read(self.pix_info.pix_bytes_frmt_parts_sizes[i])
+
+            pbr = self.pix_info.pix_bytes_frmt_parts[i].unpack(pb2)
+            next_pix.append(pbr[0])
+        self.append(next_pix)
+
+    def dump_to_fd(self, fd_in2):
+        for r2 in self.dump():
+            fd_in2.write(r2)
+
+    def dump_to_fd2(self, fd_in5):
+        for r2 in self.dump2():
+            fd_in5.write(r2)
+
+
 class CodesFilterTypes(int, object):
     NONE = 0
     SUB = 1
     UP = 2
     AVERAGE = 3
     PAETH = 4
+    struct_filter_byte = struct.Struct('>B')
 
     @property
     def name(self):
         return ('None', 'Sub', 'Up', 'Average', 'Paeth')[self]
+
+    @classmethod
+    def from_fd(cls, fd_in3):
+        new_self = cls(cls.struct_filter_byte.unpack(fd_in3.read(1))[0])
+        assert -1 < new_self < 5
+        return new_self
+
+    @property
+    def as_packed(self):
+        return self.struct_filter_byte.pack(self)
 
 png1 = PngFileHandle.read_file(TEST_FP)
 for ch in png1.chunks:
