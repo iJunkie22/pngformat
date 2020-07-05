@@ -1,5 +1,7 @@
 # coding: utf-8
+from __future__ import print_function, unicode_literals
 
+import six.moves
 import struct
 import binascii
 import base64
@@ -11,10 +13,10 @@ import operator
 
 PNG_HEAD = b'\x89\x50\x4E\x47\x0D\x0A\x1A\x0A'
 
-PNG_IHDR = 'IHDR'
-PNG_PLTE = 'PLTE'
-PNG_IDAT = 'IDAT'
-PNG_IEND = 'IEND'
+PNG_IHDR = b'IHDR'
+PNG_PLTE = b'PLTE'
+PNG_IDAT = b'IDAT'
+PNG_IEND = b'IEND'
 
 bstr = binascii.hexlify
 
@@ -25,14 +27,18 @@ def sync_io(fd1, fd2):
     fd2.seek(fd1.tell(), 0)
 
 
+def crc32(*args, **kwargs):
+    return zlib.crc32(*args, **kwargs) & 0xffffffff  # generate the same numeric value across all Pythons
+
+
 class PngChunk(object):
     struct_header = struct.Struct('>i4s')
 
     def __init__(self, *args, **kwargs):
-        self.clength = None
-        self.chunk_type = None
-        self.chunk_data = None
-        self.crc = None
+        self.clength = None  # type: int
+        self.chunk_type = None  # type: bytes
+        self.chunk_data = None  # type: bytes
+        self.crc = None  # type: int
 
     @classmethod
     def read_new(cls, fd_in):
@@ -45,28 +51,47 @@ class PngChunk(object):
             new_chunk.crc = fd_in.read(4)
         return new_chunk
 
+    def _update_crc(self):
+        self.crc = crc32(self.struct_header.pack(self.clength, self.chunk_type)[4:] + self.chunk_data)
+
+    def _update_clength(self):
+        self.clength = len(self.data_as_hex)
+
+    def write_to_fd(self, fd_out):
+        cheader = self.struct_header.pack(self.clength, self.chunk_type)
+        fd_out.write(cheader)
+        fd_out.write(self.chunk_data)
+        fd_out.write(self.crc)
+
+    def write_to_str(self):
+        with io.BytesIO() as str_buffer:
+            str_buffer.write(self.struct_header.pack(self.clength, self.chunk_type))
+            str_buffer.write(self.chunk_data)
+            str_buffer.write(b'%s' % self.crc)
+            return str_buffer.getvalue()
+
     @property
     def is_valid_type(self):
-        return isinstance(self.chunk_type, (str, unicode)) and self.chunk_type[2].isupper()
+        return isinstance(self.chunk_type, bytes) and chr(bytearray(self.chunk_type)[2]).isupper()
 
     @property
     def is_critical(self):
         if self.is_valid_type:
-            return self.chunk_type[0].isupper()
+            return chr(bytearray(self.chunk_type)[0]).isupper()
         else:
             raise AttributeError('Not a valid chunk_type')
 
     @property
     def is_public(self):
         if self.is_valid_type:
-            return self.chunk_type[1].isupper()
+            return chr(bytearray(self.chunk_type)[1]).isupper()
         else:
             raise AttributeError('Not a valid chunk_type')
 
     @property
     def is_copy_safe(self):
         if self.is_valid_type:
-            return self.chunk_type[3].islower()
+            return chr(bytearray(self.chunk_type)[3]).islower()
         else:
             raise AttributeError('Not a valid chunk_type')
 
@@ -117,7 +142,7 @@ class PngFileHandle(object):
         try:
             header = fd1.read(len(PNG_HEAD))
             last_chunk = PngChunk()
-            last_chunk.chunk_type = 'XXXX'
+            last_chunk.chunk_type = b'XXXX'
             while last_chunk.chunk_type != PNG_IEND:
                 last_chunk = PngChunk.read_new(fd1)
                 new_png.chunks.append(last_chunk)
@@ -195,7 +220,7 @@ class PngFileHandle(object):
                     other_above = prev_sl_deque[len(curr_sl_deque) - 1]
 
                     other_sum = map(operator.add, other_left, other_above)
-                    other_av = map(operator.floordiv, other_sum, 2)
+                    other_av = [(x // 2) for x in other_sum]
 
                     result_tup = map(operator.add, curr_sl_deque.pop(), other_av)
                     curr_sl_deque.append(result_tup)
@@ -229,16 +254,19 @@ class PngFileHandle(object):
         data_buf_filtered.close()
 
 
-class IHDRDict(OrderedDict, object):
+class IHDRDict(OrderedDict):
     CHUNK_KEYS = ('Width', 'Height', 'Bit depth', 'Color type', 'Compression method',
                   'Filter method', 'Interlace method')
+
+    def __init__(self, seq):
+        super(IHDRDict, self).__init__(seq)
 
     @classmethod
     def frombytes(cls, bs):
         if len(bs) == 25:
-            sformat = '>8x2i5b4x'
+            sformat = '>8x2i5b4x'  # passed in a full chunk. Strip the frame.
         elif len(bs) == 13:
-            sformat = '>2i5b'
+            sformat = '>2i5b'  # passed in only the data.
         else:
             raise RuntimeError('Invalid IHDR length')
 
@@ -279,11 +307,11 @@ class IHDRDict(OrderedDict, object):
 
     @property
     def crc(self):
-        return zlib.crc32(struct.pack('>4s', 'IHDR') + self.data_bytes)
+        return crc32(struct.pack('>4s', PNG_IHDR) + self.data_bytes)
 
     @property
     def chunk_bytes(self):
-        return struct.pack('>i4s', 25, 'IHDR') + self.data_bytes + struct.pack('>i', self.crc)
+        return struct.pack('>i4s', 25, PNG_IHDR) + self.data_bytes + struct.pack('>I', self.crc)
 
 
 def read_chunk(fd_in):
@@ -395,11 +423,11 @@ class PngPixInfo(object):
 
     def zero_pad(self):
         data_buf_zero = io.BytesIO()
-        for x in xrange(self.width * self.one_pix_len):
-            data_buf_zero.write('\x00')
+        for x in six.moves.xrange(self.width * self.one_pix_len):
+            data_buf_zero.write(b'\x00')
 
         data_buf_zero.seek(0)
-        for x in xrange(self.width):
+        for x in six.moves.xrange(self.width):
             zero_pix = []
             for i_frmt, i_size in zip(self.pix_bytes_frmt_parts, self.pix_bytes_frmt_parts_sizes):
                 zero_pix.append(i_frmt.unpack(data_buf_zero.read(i_size))[0])
@@ -420,7 +448,7 @@ class PngScanLine(deque):
 
     def dump(self):
         for pix in self:
-            for i in xrange(len(self.pix_info.pix_bytes_frmt_parts_sizes)):
+            for i in six.moves.xrange(len(self.pix_info.pix_bytes_frmt_parts_sizes)):
                 try:
                     r2 = self.pix_info.pix_bytes_frmt_parts[i].pack(pix[i])
                     yield r2
@@ -430,7 +458,7 @@ class PngScanLine(deque):
 
     def dump2(self):
         for pix in self:  # Dump the previous scanline
-            for i in xrange(len(self.pix_info.pix_bytes_frmt_parts_sizes)):
+            for i in six.moves.xrange(len(self.pix_info.pix_bytes_frmt_parts_sizes)):
                 try:
                     r2 = self.pix_info.pix_bytes_frmt_parts[i].pack(pix[i])
                 except struct.error:
@@ -439,7 +467,7 @@ class PngScanLine(deque):
 
     def read_raw_pixel(self, fd_in_4):
         next_pix = []
-        for i in xrange(len(self.pix_info.pix_bytes_frmt_parts_sizes)):
+        for i in six.moves.xrange(len(self.pix_info.pix_bytes_frmt_parts_sizes)):
             pb2 = fd_in_4.read(self.pix_info.pix_bytes_frmt_parts_sizes[i])
 
             pbr = self.pix_info.pix_bytes_frmt_parts[i].unpack(pb2)
@@ -477,19 +505,20 @@ class CodesFilterTypes(int, object):
     def as_packed(self):
         return self.struct_filter_byte.pack(self)
 
+
 png1 = PngFileHandle.read_file(TEST_FP)
 for ch in png1.chunks:
     if ch.chunk_type == PNG_IDAT:
-        print ch.data_as_hex[:30]
+        print(ch.data_as_hex[:30])
 
-print CodesFilterTypes.NONE
+print(CodesFilterTypes.NONE)
 
-print bstr(png1.ihdr_dict.chunk_bytes)
-print png1.ihdr_dict
-print png1.ihdr_dict.crc
-print CodesColorType(png1.ihdr_dict.color_type).as_dict
+print(bstr(png1.ihdr_dict.chunk_bytes))
+print(png1.ihdr_dict)
+print(png1.ihdr_dict.crc)
+print(CodesColorType(png1.ihdr_dict.color_type).as_dict)
 
 with open('dump1.txt', 'w') as fd2:
     for p1 in png1.get_pixels():
         fd2.write(repr(p1) + '\n')
-print "hi"
+print("hi")
